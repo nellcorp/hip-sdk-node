@@ -4,15 +4,33 @@
   "description": "Node.js/TypeScript SDK for platforms integrating with the Human Identity Protocol",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "files": ["dist", "!dist/**/*.test.*"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "test": "node --test dist/**/*.test.js",
     "pretest": "tsc",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "keywords": ["hip", "human-identity", "verification", "ed25519", "jws"],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nellcorp/hip-sdk-node.git"
+  },
+  "homepage": "https://github.com/nellcorp/hip-sdk-node#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "devDependencies": {
     "typescript": "^5.7.0",
     "@types/node": "^22.0.0"
