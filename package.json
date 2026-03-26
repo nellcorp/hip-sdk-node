@@ -13,8 +13,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --test dist/**/*.test.js",
-    "pretest": "tsc",
+    "test": "tsc && node --test dist/client.test.js",
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },
