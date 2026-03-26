@@ -13,7 +13,7 @@ function generateEd25519KeyPair() {
 }
 
 function signJWS(privateDER: Buffer, payload: Buffer): string {
-  const header = Buffer.from('{"alg":"EdDSA","typ":"JWT"}').toString("base64url");
+  const header = Buffer.from('{"alg":"EdDSA","kid":"test-key"}').toString("base64url");
   const encodedPayload = payload.toString("base64url");
   const signingInput = `${header}.${encodedPayload}`;
   const signature = sign(null, Buffer.from(signingInput), {
