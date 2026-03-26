@@ -40,4 +40,6 @@ export interface HIPClientOptions {
   keyResolver?: KeyResolver;
   /** Request timeout in milliseconds (default: 10000). */
   timeoutMs?: number;
+  /** Override provider URL (for testing or non-standard deployments). Skips auto-discovery from subject_id. */
+  providerURL?: string;
 }

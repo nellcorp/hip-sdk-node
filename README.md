@@ -21,14 +21,13 @@ const client = new HIPClient("your-api-key", "your-jwt-secret", {
   keyResolver: resolver,
 });
 
-const resp = await client.verify(
-  "https://provider.example.com/.well-known/identity",
-  {
-    subject_id: "abc123@provider.example.com",
-    purpose: "account_creation",
-    minimum_score: 60,
-  },
-);
+// The provider URL is auto-discovered from the subject ID
+// (abc123@provider.example.com → provider.example.com).
+const resp = await client.verify({
+  subject_id: "abc123@provider.example.com",
+  purpose: "account_creation",
+  minimum_score: 60,
+});
 
 console.log(`Status: ${resp.status}, Score: ${resp.score}`);
 ```
@@ -41,6 +40,7 @@ console.log(`Status: ${resp.status}, Score: ${resp.score}`);
 - **Request ID generation** — UUID v4 auto-generated if not provided
 - **Registry key resolver** with TTL-based caching and last-known-good fallback
 - **Nonce verification** — ensures response nonce matches request
+- **Auto-discovery** — provider URL derived from subject ID (`{id}@{provider}`)
 - **Zero external dependencies** — uses only Node.js built-in `crypto` module
 
 ## Custom Key Resolver

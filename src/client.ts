@@ -10,11 +10,14 @@ import type {
 /**
  * HIP SDK client for verifying human identities from platforms.
  *
+ * The provider URL is auto-discovered from the subject ID:
+ * `abc123@provider.example.com` → `https://provider.example.com/.well-known/identity/verify`
+ *
  * ```ts
  * const client = new HIPClient("api-key", "jwt-secret", {
  *   keyResolver: new RegistryKeyResolver("https://registry.hip.dev"),
  * });
- * const resp = await client.verify("https://provider.example.com/.well-known/identity", {
+ * const resp = await client.verify({
  *   subject_id: "abc123@provider.example.com",
  * });
  * ```
@@ -25,6 +28,7 @@ export class HIPClient {
   private readonly fetchImpl: typeof fetch;
   private readonly keyResolver?: KeyResolver;
   private readonly timeoutMs: number;
+  private readonly providerURL?: string;
 
   constructor(
     apiKey: string,
@@ -36,19 +40,24 @@ export class HIPClient {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.keyResolver = options.keyResolver;
     this.timeoutMs = options.timeoutMs ?? 10_000;
+    this.providerURL = options.providerURL;
   }
 
   /**
-   * Sends a verification request to the provider and verifies the response.
+   * Sends a verification request and verifies the response.
+   * The provider URL is derived from the subject_id unless providerURL
+   * was set in the constructor options.
    * Auto-generates nonce and request_id if not provided.
    */
-  async verify(
-    providerURL: string,
-    req: VerifyRequest,
-  ): Promise<VerifyResponse> {
+  async verify(req: VerifyRequest): Promise<VerifyResponse> {
     if (!req.subject_id) {
       throw new Error("hip: subject_id is required");
     }
+
+    const providerID = extractProviderFromSubject(req.subject_id);
+    const verifyURL = this.providerURL
+      ? `${this.providerURL}/verify`
+      : `https://${providerID}/.well-known/identity/verify`;
 
     // Auto-generate nonce and request ID.
     const nonce = req.nonce ?? randomBytes(32).toString("base64url");
@@ -60,7 +69,7 @@ export class HIPClient {
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
-      const resp = await this.fetchImpl(`${providerURL}/verify`, {
+      const resp = await this.fetchImpl(verifyURL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -87,7 +96,6 @@ export class HIPClient {
 
       // Verify JWS signature if key resolver is configured.
       if (this.keyResolver && verifyResp.signature) {
-        const providerID = extractProviderID(providerURL);
         const pubKey = await this.keyResolver.resolvePublicKey(providerID);
         verifyJWS(pubKey, verifyResp.signature);
       }
@@ -99,19 +107,16 @@ export class HIPClient {
   }
 }
 
-/** Extracts hostname from a provider URL. */
-function extractProviderID(url: string): string {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    // Fallback: strip scheme and path manually.
-    let u = url;
-    const schemeIdx = u.indexOf("://");
-    if (schemeIdx >= 0) u = u.slice(schemeIdx + 3);
-    const pathIdx = u.indexOf("/");
-    if (pathIdx >= 0) u = u.slice(0, pathIdx);
-    const portIdx = u.indexOf(":");
-    if (portIdx >= 0) u = u.slice(0, portIdx);
-    return u;
+/**
+ * Extracts the provider domain from a subject ID.
+ * e.g. "abc123@provider.example.com" → "provider.example.com"
+ */
+function extractProviderFromSubject(subjectID: string): string {
+  const idx = subjectID.lastIndexOf("@");
+  if (idx < 0 || idx === subjectID.length - 1) {
+    throw new Error(
+      `hip: invalid subject_id format, expected {id}@{provider}: "${subjectID}"`,
+    );
   }
+  return subjectID.slice(idx + 1);
 }
