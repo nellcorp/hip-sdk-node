@@ -86,7 +86,7 @@ describe("HIPClient", () => {
         keyResolver: new StaticKeyResolver(publicKey as unknown as Buffer),
       });
       const resp = await client.verify({
-        subject_id: "abc123@provider.example.com",
+        subject_id: "xK7mN2pR9sT4vW6yB@id.provider.example.com",
         purpose: "account_creation",
       });
       assert.equal(resp.status, "active");
@@ -105,7 +105,7 @@ describe("HIPClient", () => {
     try {
       const client = new HIPClient("key", "secret", { providerURL: srv.url });
       await assert.rejects(
-        () => client.verify({ subject_id: "abc123@provider.example.com", nonce: "my-nonce" }),
+        () => client.verify({ subject_id: "xK7mN2pR9sT4vW6yB@id.provider.example.com", nonce: "my-nonce" }),
         /nonce mismatch/,
       );
     } finally {
@@ -132,7 +132,7 @@ describe("HIPClient", () => {
         keyResolver: new StaticKeyResolver(publicKey as unknown as Buffer),
       });
       await assert.rejects(
-        () => client.verify({ subject_id: "abc123@provider.example.com" }),
+        () => client.verify({ subject_id: "xK7mN2pR9sT4vW6yB@id.provider.example.com" }),
         /invalid signature/,
       );
     } finally {
@@ -156,6 +156,14 @@ describe("HIPClient", () => {
     );
   });
 
+  it("rejects subject_id missing id. prefix", async () => {
+    const client = new HIPClient("key", "secret");
+    await assert.rejects(
+      () => client.verify({ subject_id: "abc123@provider.example.com" }),
+      /missing id\. prefix/,
+    );
+  });
+
   it("auto-generates nonce and request_id", async () => {
     let receivedBody: VerifyRequest | null = null;
     const srv = await startTestServer(async (req, res) => {
@@ -170,7 +178,7 @@ describe("HIPClient", () => {
 
     try {
       const client = new HIPClient("key", "secret", { providerURL: srv.url });
-      await client.verify({ subject_id: "abc123@provider.example.com" });
+      await client.verify({ subject_id: "xK7mN2pR9sT4vW6yB@id.provider.example.com" });
       assert.ok(receivedBody!.nonce, "expected auto-generated nonce");
       assert.ok(receivedBody!.request_id, "expected auto-generated request_id");
     } finally {
@@ -187,7 +195,7 @@ describe("HIPClient", () => {
     try {
       const client = new HIPClient("key", "secret", { providerURL: srv.url });
       await assert.rejects(
-        () => client.verify({ subject_id: "abc123@provider.example.com" }),
+        () => client.verify({ subject_id: "xK7mN2pR9sT4vW6yB@id.provider.example.com" }),
         /500/,
       );
     } finally {

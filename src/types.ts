@@ -7,6 +7,13 @@ export interface VerifyRequest {
   nonce?: string;
 }
 
+/** Request to exchange a signup code for a subject_id and verification. */
+export interface ExchangeRequest {
+  signup_code: string;
+  request_id?: string;
+  nonce?: string;
+}
+
 /** Provider's signed response. */
 export interface VerifyResponse {
   request_id: string;

@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { verifyJWS } from "./jws.js";
 import type {
+  ExchangeRequest,
   HIPClientOptions,
   KeyResolver,
   VerifyRequest,
@@ -11,14 +12,14 @@ import type {
  * HIP SDK client for verifying human identities from platforms.
  *
  * The provider URL is auto-discovered from the subject ID:
- * `abc123@provider.example.com` → `https://provider.example.com/.well-known/hip/verify`
+ * `xK7mN2pR9sT4vW6yB@id.humanidentity.io` → `https://humanidentity.io/.well-known/hip/verify`
  *
  * ```ts
  * const client = new HIPClient("api-key", "jwt-secret", {
  *   keyResolver: new RegistryKeyResolver("https://registry.hip.dev"),
  * });
  * const resp = await client.verify({
- *   subject_id: "abc123@provider.example.com",
+ *   subject_id: "xK7mN2pR9sT4vW6yB@id.humanidentity.io",
  * });
  * ```
  */
@@ -105,18 +106,102 @@ export class HIPClient {
       clearTimeout(timeout);
     }
   }
+
+  /**
+   * Exchanges a signup code for a subject_id and verification response.
+   * Requires providerURL to be set in constructor options.
+   * Auto-generates nonce and request_id if not provided.
+   */
+  async exchangeSignupCode(req: ExchangeRequest): Promise<VerifyResponse> {
+    if (!req.signup_code) {
+      throw new Error("hip: signup_code is required");
+    }
+
+    if (!this.providerURL) {
+      throw new Error(
+        "hip: providerURL must be set for signup code exchange",
+      );
+    }
+
+    const exchangeURL = `${this.providerURL}/exchange`;
+
+    // Auto-generate nonce and request ID.
+    const nonce = req.nonce ?? randomBytes(32).toString("base64url");
+    const requestID = req.request_id ?? randomUUID();
+
+    const body: ExchangeRequest = { ...req, nonce, request_id: requestID };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const resp = await this.fetchImpl(exchangeURL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.jwtSecret}`,
+          "X-API-Key": this.apiKey,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`hip: provider returned ${resp.status}: ${text}`);
+      }
+
+      const exchangeResp = (await resp.json()) as VerifyResponse;
+
+      // Verify nonce.
+      if (exchangeResp.nonce !== nonce) {
+        throw new Error(
+          `hip: nonce mismatch: sent "${nonce}", got "${exchangeResp.nonce}"`,
+        );
+      }
+
+      // Verify JWS signature if key resolver is configured.
+      // For exchange, we need to extract provider from the providerURL.
+      if (this.keyResolver && exchangeResp.signature) {
+        const providerID = extractProviderFromURL(this.providerURL);
+        const pubKey = await this.keyResolver.resolvePublicKey(providerID);
+        verifyJWS(pubKey, exchangeResp.signature);
+      }
+
+      return exchangeResp;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 /**
  * Extracts the provider domain from a subject ID.
- * e.g. "abc123@provider.example.com" → "provider.example.com"
+ * Expected format: {derived_id}@id.{provider_domain}
+ * e.g. "xK7mN2pR9sT4vW6yB@id.humanidentity.io" → "humanidentity.io"
+ * The "id." prefix is a namespace marker preventing collision with real emails.
  */
 function extractProviderFromSubject(subjectID: string): string {
   const idx = subjectID.lastIndexOf("@");
   if (idx < 0 || idx === subjectID.length - 1) {
-    throw new Error(
-      `hip: invalid subject_id format, expected {id}@{provider}: "${subjectID}"`,
-    );
+    throw new Error(`hip: invalid subject_id format: "${subjectID}"`);
   }
-  return subjectID.slice(idx + 1);
+  const host = subjectID.slice(idx + 1);
+  if (!host.startsWith("id.")) {
+    throw new Error(`hip: missing id. prefix: "${subjectID}"`);
+  }
+  return host.slice(3);
+}
+
+/**
+ * Extracts the provider domain from a provider URL.
+ * e.g. "https://humanidentity.io/.well-known/hip" → "humanidentity.io"
+ */
+function extractProviderFromURL(providerURL: string): string {
+  try {
+    const url = new URL(providerURL);
+    return url.hostname;
+  } catch {
+    throw new Error(`hip: invalid provider URL: "${providerURL}"`);
+  }
 }
