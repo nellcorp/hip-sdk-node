@@ -15,7 +15,7 @@ import type {
  * `xK7mN2pR9sT4vW6yB@id.humanidentity.io` → `https://humanidentity.io/.well-known/hip/verify`
  *
  * ```ts
- * const client = new HIPClient("api-key", "jwt-secret", {
+ * const client = new HIPClient("hip_sk_...", {
  *   keyResolver: new RegistryKeyResolver("https://registry.hip.dev"),
  * });
  * const resp = await client.verify({
@@ -25,19 +25,18 @@ import type {
  */
 export class HIPClient {
   private readonly apiKey: string;
-  private readonly jwtSecret: string;
   private readonly fetchImpl: typeof fetch;
   private readonly keyResolver?: KeyResolver;
   private readonly timeoutMs: number;
   private readonly providerURL?: string;
 
-  constructor(
-    apiKey: string,
-    jwtSecret: string,
-    options: HIPClientOptions = {},
-  ) {
+  /**
+   * @param apiKey The `hip_sk_…` secret issued by the provider for this
+   * platform. Sent as a Bearer token on every request; the provider derives
+   * the platform from the key.
+   */
+  constructor(apiKey: string, options: HIPClientOptions = {}) {
     this.apiKey = apiKey;
-    this.jwtSecret = jwtSecret;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.keyResolver = options.keyResolver;
     this.timeoutMs = options.timeoutMs ?? 10_000;
@@ -74,8 +73,7 @@ export class HIPClient {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${this.jwtSecret}`,
-          "X-API-Key": this.apiKey,
+          Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify(body),
         signal: controller.signal,
@@ -139,8 +137,7 @@ export class HIPClient {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${this.jwtSecret}`,
-          "X-API-Key": this.apiKey,
+          Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify(body),
         signal: controller.signal,

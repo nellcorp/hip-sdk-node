@@ -17,7 +17,7 @@ import { HIPClient, RegistryKeyResolver } from "@nellcorp/hip-sdk";
 // with 24h caching and last-known-good fallback.
 const resolver = new RegistryKeyResolver("https://registry.hip.dev");
 
-const client = new HIPClient("your-api-key", "your-jwt-secret", {
+const client = new HIPClient("hip_sk_your_api_key", {
   keyResolver: resolver,
 });
 
