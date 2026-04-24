@@ -1,6 +1,6 @@
 {
   "name": "@nellcorp/hip-sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Node.js/TypeScript SDK for platforms integrating with the Human Identity Protocol",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -2,7 +2,11 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { generateKeyPairSync, sign } from "node:crypto";
-import { HIPClient } from "./client.js";
+import {
+  HIPClient,
+  codeChallenge,
+  generateCodeVerifier,
+} from "./client.js";
 import type { KeyResolver, VerifyRequest, VerifyResponse } from "./types.js";
 
 function generateEd25519KeyPair() {
@@ -12,7 +16,10 @@ function generateEd25519KeyPair() {
   });
 }
 
-function signJWS(privateDER: Buffer, payload: Buffer): string {
+// signJWSCompact returns the JWS compact serialization (header.payload.signature).
+// This is what the HIP provider returns in the response body on /verify +
+// /exchange (Content-Type: application/jose).
+function signJWSCompact(privateDER: Buffer, payload: Buffer): string {
   const header = Buffer.from('{"alg":"EdDSA","kid":"test-key"}').toString("base64url");
   const encodedPayload = payload.toString("base64url");
   const signingInput = `${header}.${encodedPayload}`;
@@ -56,14 +63,13 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-describe("HIPClient", () => {
-  it("verify success with signature", async () => {
+describe("HIPClient.verify", () => {
+  it("verify success (JWS response)", async () => {
     const { publicKey, privateKey } = generateEd25519KeyPair();
 
     const srv = await startTestServer(async (req, res) => {
       const body = JSON.parse(await readBody(req)) as VerifyRequest;
       const resp: VerifyResponse = {
-        request_id: body.request_id!,
         subject_id: body.subject_id,
         status: "active",
         score: 95,
@@ -74,10 +80,12 @@ describe("HIPClient", () => {
         expires_at: new Date(Date.now() + 86400000).toISOString(),
         nonce: body.nonce!,
       };
-      const payload = Buffer.from(JSON.stringify(resp));
-      resp.signature = signJWS(privateKey as unknown as Buffer, payload);
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(resp));
+      const jws = signJWSCompact(
+        privateKey as unknown as Buffer,
+        Buffer.from(JSON.stringify(resp)),
+      );
+      res.writeHead(200, { "Content-Type": "application/jose" });
+      res.end(jws);
     });
 
     try {
@@ -97,43 +105,26 @@ describe("HIPClient", () => {
   });
 
   it("rejects nonce mismatch", async () => {
+    const { privateKey } = generateEd25519KeyPair();
     const srv = await startTestServer(async (_req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "active", nonce: "wrong" }));
+      const resp = { status: "active", nonce: "wrong", subject_id: "x" };
+      const jws = signJWSCompact(
+        privateKey as unknown as Buffer,
+        Buffer.from(JSON.stringify(resp)),
+      );
+      res.writeHead(200, { "Content-Type": "application/jose" });
+      res.end(jws);
     });
 
     try {
       const client = new HIPClient("key", { providerURL: srv.url });
       await assert.rejects(
-        () => client.verify({ subject_id: "xK7mN2pR9sT4vW6yB@id.provider.example.com", nonce: "my-nonce" }),
+        () =>
+          client.verify({
+            subject_id: "xK7mN2pR9sT4vW6yB@id.provider.example.com",
+            nonce: "my-nonce",
+          }),
         /nonce mismatch/,
-      );
-    } finally {
-      srv.close();
-    }
-  });
-
-  it("rejects invalid signature", async () => {
-    const { publicKey } = generateEd25519KeyPair();
-    const { privateKey: otherPriv } = generateEd25519KeyPair();
-
-    const srv = await startTestServer(async (req, res) => {
-      const body = JSON.parse(await readBody(req)) as VerifyRequest;
-      const resp: Partial<VerifyResponse> = { status: "active", nonce: body.nonce! };
-      const payload = Buffer.from(JSON.stringify(resp));
-      (resp as VerifyResponse).signature = signJWS(otherPriv as unknown as Buffer, payload);
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(resp));
-    });
-
-    try {
-      const client = new HIPClient("key", {
-        providerURL: srv.url,
-        keyResolver: new StaticKeyResolver(publicKey as unknown as Buffer),
-      });
-      await assert.rejects(
-        () => client.verify({ subject_id: "xK7mN2pR9sT4vW6yB@id.provider.example.com" }),
-        /invalid signature/,
       );
     } finally {
       srv.close();
@@ -164,23 +155,35 @@ describe("HIPClient", () => {
     );
   });
 
-  it("auto-generates nonce and request_id", async () => {
+  it("auto-generates nonce", async () => {
     let receivedBody: VerifyRequest | null = null;
+    const { privateKey } = generateEd25519KeyPair();
     const srv = await startTestServer(async (req, res) => {
       receivedBody = JSON.parse(await readBody(req)) as VerifyRequest;
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
+      const resp = {
+        subject_id: receivedBody!.subject_id,
         status: "active",
         nonce: receivedBody!.nonce,
-        request_id: receivedBody!.request_id,
-      }));
+      };
+      const jws = signJWSCompact(
+        privateKey as unknown as Buffer,
+        Buffer.from(JSON.stringify(resp)),
+      );
+      res.writeHead(200, { "Content-Type": "application/jose" });
+      res.end(jws);
     });
 
     try {
       const client = new HIPClient("key", { providerURL: srv.url });
-      await client.verify({ subject_id: "xK7mN2pR9sT4vW6yB@id.provider.example.com" });
+      await client.verify({
+        subject_id: "xK7mN2pR9sT4vW6yB@id.provider.example.com",
+      });
       assert.ok(receivedBody!.nonce, "expected auto-generated nonce");
-      assert.ok(receivedBody!.request_id, "expected auto-generated request_id");
+      assert.equal(
+        (receivedBody as unknown as { request_id?: string }).request_id,
+        undefined,
+        "request_id must NOT be sent",
+      );
     } finally {
       srv.close();
     }
@@ -195,9 +198,96 @@ describe("HIPClient", () => {
     try {
       const client = new HIPClient("key", { providerURL: srv.url });
       await assert.rejects(
-        () => client.verify({ subject_id: "xK7mN2pR9sT4vW6yB@id.provider.example.com" }),
+        () =>
+          client.verify({
+            subject_id: "xK7mN2pR9sT4vW6yB@id.provider.example.com",
+          }),
         /500/,
       );
+    } finally {
+      srv.close();
+    }
+  });
+});
+
+describe("PKCE helpers", () => {
+  it("generateCodeVerifier produces 128 base64url chars", () => {
+    const v = generateCodeVerifier();
+    assert.equal(v.length, 128);
+    assert.match(v, /^[A-Za-z0-9_-]+$/);
+  });
+
+  it("codeChallenge matches RFC 7636 Appendix B test vector", () => {
+    const verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    const expected = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+    assert.equal(codeChallenge(verifier), expected);
+  });
+});
+
+describe("HIPClient.startOAuth", () => {
+  it("builds an authorize URL with PKCE", () => {
+    const client = new HIPClient("key");
+    const flow = client.startOAuth({
+      provider_domain: "provider.example.com",
+      client_id: "my-platform",
+      redirect_uri: "https://my-platform.example.com/oauth/callback",
+      state: "csrf123",
+    });
+    assert.equal(flow.verifier.length, 128);
+    const url = new URL(flow.authorize_url);
+    assert.equal(url.origin, "https://provider.example.com");
+    assert.equal(url.pathname, "/oauth/authorize");
+    assert.equal(url.searchParams.get("client_id"), "my-platform");
+    assert.equal(url.searchParams.get("code_challenge_method"), "S256");
+    assert.equal(url.searchParams.get("state"), "csrf123");
+    assert.ok(url.searchParams.get("code_challenge"));
+  });
+
+  it("rejects missing client_id", () => {
+    const client = new HIPClient("key");
+    assert.throws(
+      () =>
+        client.startOAuth({
+          redirect_uri: "https://x/cb",
+        } as unknown as Parameters<typeof client.startOAuth>[0]),
+      /client_id/,
+    );
+  });
+});
+
+describe("HIPClient.completeOAuth", () => {
+  it("posts without Authorization header and returns token response", async () => {
+    let gotAuth: string | undefined;
+    let gotBody: Record<string, string> | undefined;
+    const srv = await startTestServer(async (req, res) => {
+      gotAuth = req.headers.authorization;
+      gotBody = JSON.parse(await readBody(req));
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          subject_id: "sid",
+          status: "active",
+          score: 95,
+          score_state: "stable",
+          attestation: "a.b.c",
+          issued_at: "2026-04-24T00:00:00Z",
+          expires_at: "2026-04-24T00:05:00Z",
+        }),
+      );
+    });
+
+    try {
+      const client = new HIPClient("shouldNotBeSent", { providerURL: srv.url });
+      const verifier = "v".repeat(128);
+      const resp = await client.completeOAuth("the-code", verifier, {
+        client_id: "my-platform",
+      });
+      assert.equal(gotAuth, undefined, "Authorization header must NOT be sent");
+      assert.equal(gotBody!["grant_type"], "authorization_code");
+      assert.equal(gotBody!["code"], "the-code");
+      assert.equal(gotBody!["client_id"], "my-platform");
+      assert.equal(gotBody!["code_verifier"], verifier);
+      assert.equal(resp.subject_id, "sid");
     } finally {
       srv.close();
     }

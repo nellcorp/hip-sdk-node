@@ -1,9 +1,13 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { verifyJWS } from "./jws.js";
 import type {
+  CompleteOAuthOptions,
   ExchangeRequest,
   HIPClientOptions,
   KeyResolver,
+  OAuthFlow,
+  OAuthStartOptions,
+  OAuthTokenResponse,
   VerifyRequest,
   VerifyResponse,
 } from "./types.js";
@@ -32,8 +36,8 @@ export class HIPClient {
 
   /**
    * @param apiKey The `hip_sk_…` secret issued by the provider for this
-   * platform. Sent as a Bearer token on every request; the provider derives
-   * the platform from the key.
+   * platform. Sent as a Bearer token on `/verify` and `/exchange`. Not used on
+   * `/oauth/token` — PKCE + `client_id` are the platform auth there.
    */
   constructor(apiKey: string, options: HIPClientOptions = {}) {
     this.apiKey = apiKey;
@@ -46,8 +50,7 @@ export class HIPClient {
   /**
    * Sends a verification request and verifies the response.
    * The provider URL is derived from the subject_id unless providerURL
-   * was set in the constructor options.
-   * Auto-generates nonce and request_id if not provided.
+   * was set in the constructor options. Auto-generates nonce if not provided.
    */
   async verify(req: VerifyRequest): Promise<VerifyResponse> {
     if (!req.subject_id) {
@@ -59,11 +62,8 @@ export class HIPClient {
       ? `${this.providerURL}/verify`
       : `https://${providerID}/.well-known/hip/verify`;
 
-    // Auto-generate nonce and request ID.
     const nonce = req.nonce ?? randomBytes(32).toString("base64url");
-    const requestID = req.request_id ?? randomUUID();
-
-    const body: VerifyRequest = { ...req, nonce, request_id: requestID };
+    const body: VerifyRequest = { ...req, nonce };
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -84,21 +84,16 @@ export class HIPClient {
         throw new Error(`hip: provider returned ${resp.status}: ${text}`);
       }
 
-      const verifyResp = (await resp.json()) as VerifyResponse;
+      // Response is a JWS compact serialization (Content-Type: application/jose).
+      const jws = (await resp.text()).trim();
+      const payload = await this.decodeAndVerifyJWS(jws, providerID);
+      const verifyResp = JSON.parse(payload.toString("utf8")) as VerifyResponse;
 
-      // Verify nonce.
       if (verifyResp.nonce !== nonce) {
         throw new Error(
           `hip: nonce mismatch: sent "${nonce}", got "${verifyResp.nonce}"`,
         );
       }
-
-      // Verify JWS signature if key resolver is configured.
-      if (this.keyResolver && verifyResp.signature) {
-        const pubKey = await this.keyResolver.resolvePublicKey(providerID);
-        verifyJWS(pubKey, verifyResp.signature);
-      }
-
       return verifyResp;
     } finally {
       clearTimeout(timeout);
@@ -108,13 +103,12 @@ export class HIPClient {
   /**
    * Exchanges a signup code for a subject_id and verification response.
    * Requires providerURL to be set in constructor options.
-   * Auto-generates nonce and request_id if not provided.
+   * Auto-generates nonce if not provided.
    */
   async exchangeSignupCode(req: ExchangeRequest): Promise<VerifyResponse> {
     if (!req.signup_code) {
       throw new Error("hip: signup_code is required");
     }
-
     if (!this.providerURL) {
       throw new Error(
         "hip: providerURL must be set for signup code exchange",
@@ -122,12 +116,8 @@ export class HIPClient {
     }
 
     const exchangeURL = `${this.providerURL}/exchange`;
-
-    // Auto-generate nonce and request ID.
     const nonce = req.nonce ?? randomBytes(32).toString("base64url");
-    const requestID = req.request_id ?? randomUUID();
-
-    const body: ExchangeRequest = { ...req, nonce, request_id: requestID };
+    const body: ExchangeRequest = { ...req, nonce };
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -148,28 +138,158 @@ export class HIPClient {
         throw new Error(`hip: provider returned ${resp.status}: ${text}`);
       }
 
-      const exchangeResp = (await resp.json()) as VerifyResponse;
+      const jws = (await resp.text()).trim();
+      const providerID = extractProviderFromURL(this.providerURL);
+      const payload = await this.decodeAndVerifyJWS(jws, providerID);
+      const exchangeResp = JSON.parse(
+        payload.toString("utf8"),
+      ) as VerifyResponse;
 
-      // Verify nonce.
       if (exchangeResp.nonce !== nonce) {
         throw new Error(
           `hip: nonce mismatch: sent "${nonce}", got "${exchangeResp.nonce}"`,
         );
       }
-
-      // Verify JWS signature if key resolver is configured.
-      // For exchange, we need to extract provider from the providerURL.
-      if (this.keyResolver && exchangeResp.signature) {
-        const providerID = extractProviderFromURL(this.providerURL);
-        const pubKey = await this.keyResolver.resolvePublicKey(providerID);
-        verifyJWS(pubKey, exchangeResp.signature);
-      }
-
       return exchangeResp;
     } finally {
       clearTimeout(timeout);
     }
   }
+
+  /**
+   * Generates a PKCE verifier/challenge pair and returns the authorize URL.
+   * Retain `flow.verifier` in the user's session until `completeOAuth`.
+   *
+   * ```ts
+   * const flow = client.startOAuth({
+   *   provider_domain: "humanidentity.io",
+   *   client_id: "my-platform.example.com",
+   *   redirect_uri: "https://my-platform.example.com/oauth/callback",
+   *   state: "csrf-token",
+   * });
+   * // save flow.verifier in session
+   * // redirect user to flow.authorize_url
+   * ```
+   */
+  startOAuth(opts: OAuthStartOptions): OAuthFlow {
+    if (!opts.client_id) {
+      throw new Error("hip: client_id is required");
+    }
+    if (!opts.redirect_uri) {
+      throw new Error("hip: redirect_uri is required");
+    }
+    const base = this.resolveOAuthBase(opts.provider_domain);
+
+    const verifier = generateCodeVerifier();
+    const challenge = codeChallenge(verifier);
+
+    const params = new URLSearchParams({
+      client_id: opts.client_id,
+      redirect_uri: opts.redirect_uri,
+      response_type: "code",
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+    });
+    if (opts.state) params.set("state", opts.state);
+
+    return {
+      authorize_url: `${base}/oauth/authorize?${params.toString()}`,
+      verifier,
+    };
+  }
+
+  /**
+   * Exchanges an authorization code + PKCE verifier for a verification
+   * attestation. No Authorization header is sent — /oauth/token authenticates
+   * the platform via client_id + code_verifier.
+   */
+  async completeOAuth(
+    code: string,
+    verifier: string,
+    opts: CompleteOAuthOptions,
+  ): Promise<OAuthTokenResponse> {
+    if (!code) throw new Error("hip: code is required");
+    if (!verifier) throw new Error("hip: verifier is required");
+    if (!opts.client_id) throw new Error("hip: client_id is required");
+
+    const base = this.resolveOAuthBase(opts.provider_domain);
+    const url = `${base}/oauth/token`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const resp = await this.fetchImpl(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          // No Authorization header — PKCE + client_id are the auth.
+        },
+        body: JSON.stringify({
+          grant_type: "authorization_code",
+          code,
+          client_id: opts.client_id,
+          code_verifier: verifier,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`hip: provider returned ${resp.status}: ${text}`);
+      }
+
+      return (await resp.json()) as OAuthTokenResponse;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private resolveOAuthBase(providerDomain?: string): string {
+    let base = this.providerURL ?? "";
+    if (base) {
+      base = base.replace(/\/+$/, "").replace(/\/\.well-known\/hip$/, "");
+      return base;
+    }
+    if (!providerDomain) {
+      throw new Error(
+        "hip: provider_domain is required (or configure the client with providerURL)",
+      );
+    }
+    return `https://${providerDomain}`;
+  }
+
+  private async decodeAndVerifyJWS(
+    jws: string,
+    providerID: string,
+  ): Promise<Buffer> {
+    const parts = jws.split(".");
+    if (parts.length !== 3) {
+      throw new Error(
+        `hip: malformed JWS: expected 3 parts, got ${parts.length}`,
+      );
+    }
+    if (this.keyResolver) {
+      const pubKey = await this.keyResolver.resolvePublicKey(providerID);
+      return verifyJWS(pubKey, jws);
+    }
+    return Buffer.from(parts[1]!, "base64url");
+  }
+}
+
+/**
+ * Generates a PKCE code_verifier: 96 random bytes → 128 base64url chars.
+ */
+export function generateCodeVerifier(): string {
+  return randomBytes(96).toString("base64url");
+}
+
+/**
+ * Computes the PKCE code_challenge for a given verifier:
+ * base64url(SHA-256(verifier)).
+ */
+export function codeChallenge(verifier: string): string {
+  return createHash("sha256").update(verifier).digest("base64url");
 }
 
 /**
