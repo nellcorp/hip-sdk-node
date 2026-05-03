@@ -15,7 +15,7 @@ import { HIPClient, RegistryKeyResolver } from "@nellcorp/hip-sdk";
 
 // Key resolver fetches provider public keys from the registry
 // with 24h caching and last-known-good fallback.
-const resolver = new RegistryKeyResolver("https://registry.hip.dev");
+const resolver = new RegistryKeyResolver("https://registry.humanidentity.io");
 
 const client = new HIPClient("hip_sk_your_api_key", {
   keyResolver: resolver,

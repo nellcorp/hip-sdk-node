@@ -20,7 +20,7 @@ import type {
  *
  * ```ts
  * const client = new HIPClient("hip_sk_...", {
- *   keyResolver: new RegistryKeyResolver("https://registry.hip.dev"),
+ *   keyResolver: new RegistryKeyResolver("https://registry.humanidentity.io"),
  * });
  * const resp = await client.verify({
  *   subject_id: "xK7mN2pR9sT4vW6yB@id.humanidentity.io",
