@@ -225,9 +225,11 @@ describe("PKCE helpers", () => {
 });
 
 describe("HIPClient.startOAuth", () => {
-  it("builds an authorize URL with PKCE", () => {
-    const client = new HIPClient("key");
-    const flow = client.startOAuth({
+  it("builds an authorize URL with PKCE", async () => {
+    // registries: [] disables the auto-created RegistryKeyResolver so the test
+    // does not try to hit the canonical registry over the network.
+    const client = new HIPClient("key", { registries: [] });
+    const flow = await client.startOAuth({
       provider_domain: "provider.example.com",
       client_id: "my-platform",
       redirect_uri: "https://my-platform.example.com/oauth/callback",
@@ -243,15 +245,39 @@ describe("HIPClient.startOAuth", () => {
     assert.ok(url.searchParams.get("code_challenge"));
   });
 
-  it("rejects missing client_id", () => {
-    const client = new HIPClient("key");
-    assert.throws(
+  it("rejects missing client_id", async () => {
+    const client = new HIPClient("key", { registries: [] });
+    await assert.rejects(
       () =>
         client.startOAuth({
           redirect_uri: "https://x/cb",
         } as unknown as Parameters<typeof client.startOAuth>[0]),
       /client_id/,
     );
+  });
+
+  it("uses registry-discovered authorize URL when provided", async () => {
+    const fakeResolver = {
+      resolvePublicKey: async () => Buffer.alloc(32),
+      resolveProvider: async () => ({
+        id: "provider.example.com",
+        endpoints: {
+          verify: "https://api.example.com/.well-known/hip/verify",
+          exchange: "https://api.example.com/.well-known/hip/exchange",
+          oauth_authorize: "https://identity.example.com/oauth/authorize",
+          oauth_token: "https://api.example.com/oauth/token",
+        },
+      }),
+    };
+    const client = new HIPClient("key", { keyResolver: fakeResolver });
+    const flow = await client.startOAuth({
+      provider_domain: "provider.example.com",
+      client_id: "my-platform",
+      redirect_uri: "https://my-platform.example.com/cb",
+    });
+    const url = new URL(flow.authorize_url);
+    assert.equal(url.origin, "https://identity.example.com");
+    assert.equal(url.pathname, "/oauth/authorize");
   });
 });
 

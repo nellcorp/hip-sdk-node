@@ -71,13 +71,56 @@ export interface KeyResolver {
   resolvePublicKey(providerID: string): Promise<Buffer>;
 }
 
+/** Resolves a provider's full HIP/1.1 registry entry. */
+export interface ProviderResolver {
+  resolveProvider(providerID: string): Promise<ProviderEntry>;
+}
+
+/** HIP/1.1 protocol surfaces (PROTOCOL.md §10.2). */
+export interface ProviderEndpoints {
+  verify: string;
+  exchange: string;
+  oauth_authorize: string;
+  oauth_token: string;
+}
+
+/** End-user-facing surfaces. */
+export interface ProviderApps {
+  identity?: string;
+  provider?: string;
+}
+
+/** Provider registry entry. HIP/1.1+ readers MUST resolve protocol endpoint
+ * URLs from `endpoints` instead of string-concatenating against `id`. */
+export interface ProviderEntry {
+  id: string;
+  display_name?: string;
+  domain?: string;
+  tier?: string;
+  status?: string;
+  public_key?: string;
+  certificate_fingerprint?: string;
+  endpoints: ProviderEndpoints;
+  apps?: ProviderApps;
+  peer_registries?: string[];
+  /** @deprecated Removed in HIP/1.3. Use endpoints. */
+  well_known_url?: string;
+  entry_signature?: string;
+}
+
 export interface HIPClientOptions {
   /** Custom fetch implementation (defaults to global fetch). */
   fetch?: typeof fetch;
-  /** Key resolver for JWS signature verification. */
+  /** Key resolver for JWS signature verification. If the resolver also
+   * implements ProviderResolver, registry-driven service discovery is
+   * enabled. */
   keyResolver?: KeyResolver;
   /** Request timeout in milliseconds (default: 10000). */
   timeoutMs?: number;
-  /** Override provider URL (for testing or non-standard deployments). Skips auto-discovery from subject_id. */
+  /** Override provider URL (for testing or non-standard deployments).
+   * Bypasses HIP/1.1 service discovery entirely. */
   providerURL?: string;
+  /** Priority-ordered list of registry URLs (v2 federation hook). When unset
+   * the SDK uses [DEFAULT_REGISTRY_URL]. Ignored when keyResolver is supplied. */
+  registries?: string[];
 }
