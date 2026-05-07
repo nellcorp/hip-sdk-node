@@ -1,3 +1,4 @@
+import { verifyJWS } from "./jws.js";
 import type { KeyResolver, ProviderEntry, ProviderResolver } from "./types.js";
 
 /** The canonical HIP registry URL. SDK consumers SHOULD NOT override this in
@@ -29,6 +30,7 @@ export class RegistryKeyResolver implements KeyResolver, ProviderResolver {
   private readonly keyCache = new Map<string, CachedKey>();
   private readonly providerCache = new Map<string, CachedProvider>();
   private readonly fetchImpl: typeof fetch;
+  private rootKeyDER?: Buffer;
 
   constructor(
     registryURL: string = DEFAULT_REGISTRY_URL,
@@ -40,6 +42,14 @@ export class RegistryKeyResolver implements KeyResolver, ProviderResolver {
     this.fetchImpl = fetchImpl ?? globalThis.fetch;
   }
 
+  /** Pins the Ed25519 public key used to verify JWS-signed registry
+   * responses. Accepts either a raw 32-byte key or a 44-byte SPKI-DER
+   * encoding. When unset, the resolver accepts plain-JSON responses without
+   * signature verification (intended for dev / local stubs). */
+  setRegistryRootKey(key: Buffer): void {
+    this.rootKeyDER = ed25519ToSPKI(key);
+  }
+
   async resolvePublicKey(providerID: string): Promise<Buffer> {
     const cached = this.keyCache.get(providerID);
     if (cached && Date.now() - cached.fetchedAt < this.ttlMs) {
@@ -48,15 +58,10 @@ export class RegistryKeyResolver implements KeyResolver, ProviderResolver {
 
     try {
       const url = `${this.registryURL}/providers/${providerID}/certificate`;
-      const resp = await this.fetchImpl(url, {
-        headers: { Accept: "application/json" },
-      });
-
-      if (!resp.ok) {
-        throw new Error(`registry returned ${resp.status}`);
-      }
-
-      const body = (await resp.json()) as { public_key: string };
+      const payload = await this.fetchAndUnwrap(url);
+      const body = JSON.parse(payload.toString("utf-8")) as {
+        public_key: string;
+      };
       const key = parsePEMPublicKey(body.public_key);
 
       this.keyCache.set(providerID, { key, fetchedAt: Date.now() });
@@ -78,13 +83,8 @@ export class RegistryKeyResolver implements KeyResolver, ProviderResolver {
 
     try {
       const url = `${this.registryURL}/providers/${providerID}`;
-      const resp = await this.fetchImpl(url, {
-        headers: { Accept: "application/json" },
-      });
-      if (!resp.ok) {
-        throw new Error(`registry returned ${resp.status}`);
-      }
-      const entry = (await resp.json()) as ProviderEntry;
+      const payload = await this.fetchAndUnwrap(url);
+      const entry = JSON.parse(payload.toString("utf-8")) as ProviderEntry;
       this.providerCache.set(providerID, { entry, fetchedAt: Date.now() });
       return entry;
     } catch (err) {
@@ -94,6 +94,61 @@ export class RegistryKeyResolver implements KeyResolver, ProviderResolver {
       throw err;
     }
   }
+
+  /** Fetches the URL and returns the payload bytes ready for JSON.parse.
+   * When the response Content-Type is application/jose AND a root key is
+   * pinned, the JWS signature is verified before the payload is returned.
+   * Otherwise the body is returned verbatim (legacy / dev path). */
+  private async fetchAndUnwrap(url: string): Promise<Buffer> {
+    const resp = await this.fetchImpl(url, {
+      headers: { Accept: "application/jose, application/json;q=0.5" },
+    });
+    if (!resp.ok) {
+      throw new Error(`registry returned ${resp.status}`);
+    }
+    const bodyBytes = Buffer.from(await resp.arrayBuffer());
+
+    if (isJOSEContentType(resp.headers.get("content-type")) && this.rootKeyDER) {
+      const token = bodyBytes.toString("utf-8").trim();
+      try {
+        return verifyJWS(this.rootKeyDER, token);
+      } catch (err) {
+        throw new Error(
+          `registry JWS verify: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return bodyBytes;
+  }
+}
+
+/** Reports whether the given Content-Type header indicates a JWS compact
+ * serialization. Tolerates trailing parameters. */
+function isJOSEContentType(ct: string | null): boolean {
+  if (!ct) return false;
+  const sep = ct.indexOf(";");
+  const head = sep >= 0 ? ct.slice(0, sep) : ct;
+  return head.trim().toLowerCase() === "application/jose";
+}
+
+/** SPKI DER prefix for Ed25519 public keys (RFC 8410). 12 bytes followed by
+ * the 32-byte raw key. */
+const ED25519_SPKI_PREFIX = Buffer.from([
+  0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+]);
+
+/** Converts a raw 32-byte Ed25519 public key into SPKI DER form (44 bytes).
+ * Idempotent: a 44-byte SPKI input is returned verbatim. */
+function ed25519ToSPKI(key: Buffer): Buffer {
+  if (key.length === 32) {
+    return Buffer.concat([ED25519_SPKI_PREFIX, key]);
+  }
+  if (key.length === 44) {
+    return key;
+  }
+  throw new Error(
+    `unexpected Ed25519 public key length ${key.length}; want 32 (raw) or 44 (SPKI)`,
+  );
 }
 
 /** Returns the resolved verify endpoint URL for a HIP/1.1 entry, falling back

@@ -319,3 +319,97 @@ describe("HIPClient.completeOAuth", () => {
     }
   });
 });
+
+describe("RegistryKeyResolver JWS verification", () => {
+  it("verifies JWS-signed registry responses against the pinned root key", async () => {
+    const rootKeys = generateEd25519KeyPair();
+    const certKeys = generateEd25519KeyPair();
+    const certPEM = `-----BEGIN PUBLIC KEY-----\n${certKeys.publicKey
+      .toString("base64")
+      .match(/.{1,64}/g)!
+      .join("\n")}\n-----END PUBLIC KEY-----`;
+
+    const srv = await startTestServer(async (_req, res) => {
+      const body = Buffer.from(JSON.stringify({ public_key: certPEM }));
+      const jws = signJWSCompact(rootKeys.privateKey, body);
+      res.writeHead(200, { "Content-Type": "application/jose" });
+      res.end(jws);
+    });
+
+    try {
+      const { RegistryKeyResolver } = await import("./registry.js");
+      const resolver = new RegistryKeyResolver(srv.url);
+      // Strip the SPKI prefix: pass the raw 32-byte key the way prod
+      // consumers will (the embedded constant).
+      const rawRootKey = rootKeys.publicKey.subarray(12);
+      resolver.setRegistryRootKey(rawRootKey);
+
+      const got = await resolver.resolvePublicKey("any-provider");
+      assert.deepEqual(
+        Buffer.from(got).subarray(-32),
+        Buffer.from(certKeys.publicKey).subarray(-32),
+        "resolved key must match the cert key embedded in the signed payload",
+      );
+    } finally {
+      srv.close();
+    }
+  });
+
+  it("rejects JWS signed by an attacker key", async () => {
+    const rootKeys = generateEd25519KeyPair();
+    const attackerKeys = generateEd25519KeyPair();
+    const certKeys = generateEd25519KeyPair();
+    const certPEM = `-----BEGIN PUBLIC KEY-----\n${certKeys.publicKey
+      .toString("base64")
+      .match(/.{1,64}/g)!
+      .join("\n")}\n-----END PUBLIC KEY-----`;
+
+    const srv = await startTestServer(async (_req, res) => {
+      const body = Buffer.from(JSON.stringify({ public_key: certPEM }));
+      // Signed by attacker, not the pinned root.
+      const jws = signJWSCompact(attackerKeys.privateKey, body);
+      res.writeHead(200, { "Content-Type": "application/jose" });
+      res.end(jws);
+    });
+
+    try {
+      const { RegistryKeyResolver } = await import("./registry.js");
+      const resolver = new RegistryKeyResolver(srv.url);
+      resolver.setRegistryRootKey(rootKeys.publicKey.subarray(12));
+
+      await assert.rejects(
+        resolver.resolvePublicKey("any-provider"),
+        /JWS verify/,
+      );
+    } finally {
+      srv.close();
+    }
+  });
+
+  it("falls back to plain JSON when no root key is pinned", async () => {
+    const certKeys = generateEd25519KeyPair();
+    const certPEM = `-----BEGIN PUBLIC KEY-----\n${certKeys.publicKey
+      .toString("base64")
+      .match(/.{1,64}/g)!
+      .join("\n")}\n-----END PUBLIC KEY-----`;
+
+    const srv = await startTestServer(async (_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ public_key: certPEM }));
+    });
+
+    try {
+      const { RegistryKeyResolver } = await import("./registry.js");
+      const resolver = new RegistryKeyResolver(srv.url);
+      // No setRegistryRootKey() — dev-mode fallback.
+
+      const got = await resolver.resolvePublicKey("any-provider");
+      assert.deepEqual(
+        Buffer.from(got).subarray(-32),
+        Buffer.from(certKeys.publicKey).subarray(-32),
+      );
+    } finally {
+      srv.close();
+    }
+  });
+});

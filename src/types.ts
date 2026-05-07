@@ -91,7 +91,11 @@ export interface ProviderApps {
 }
 
 /** Provider registry entry. HIP/1.1+ readers MUST resolve protocol endpoint
- * URLs from `endpoints` instead of string-concatenating against `id`. */
+ * URLs from `endpoints` instead of string-concatenating against `id`.
+ *
+ * Per PROTOCOL.md §10.9, registry responses are JWS-signed by a separate
+ * registry root key — there is no per-entry signature field. The SDK
+ * verifies the JWS at the response layer before constructing this object. */
 export interface ProviderEntry {
   id: string;
   display_name?: string;
@@ -99,13 +103,17 @@ export interface ProviderEntry {
   tier?: string;
   status?: string;
   public_key?: string;
+  public_key_id?: string;
+  pending_public_key?: string;
+  pending_public_key_id?: string;
+  supported_document_types?: string[];
+  supported_countries?: string[];
   certificate_fingerprint?: string;
   endpoints: ProviderEndpoints;
   apps?: ProviderApps;
-  peer_registries?: string[];
+  peer_registries: string[];
   /** @deprecated Removed in HIP/1.3. Use endpoints. */
   well_known_url?: string;
-  entry_signature?: string;
 }
 
 export interface HIPClientOptions {
@@ -123,4 +131,10 @@ export interface HIPClientOptions {
   /** Priority-ordered list of registry URLs (v2 federation hook). When unset
    * the SDK uses [DEFAULT_REGISTRY_URL]. Ignored when keyResolver is supplied. */
   registries?: string[];
+  /** Pinned Ed25519 public key (raw 32 bytes) used to verify JWS-signed
+   * registry responses (PROTOCOL.md §10.8 + §10.9). When unset, the SDK
+   * accepts plain-JSON registry responses without signature verification —
+   * intended for dev / local stubs only. Production consumers SHOULD pin
+   * a key. */
+  registryRootKey?: Buffer;
 }
