@@ -15,6 +15,7 @@
     "build": "tsc",
     "test": "tsc && node --test dist/client.test.js",
     "lint": "tsc --noEmit",
+    "prepare": "tsc",
     "prepublishOnly": "npm run build"
   },
   "keywords": ["hip", "human-identity", "verification", "ed25519", "jws"],
