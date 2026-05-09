@@ -7,6 +7,7 @@ import {
   entryOAuthTokenURL,
   entryVerifyURL,
 } from "./registry.js";
+import { DefaultRegistryRootKey } from "./registry-root-key.js";
 import type {
   CompleteOAuthOptions,
   ExchangeRequest,
@@ -72,9 +73,8 @@ export class HIPClient {
       // resolver nor a providerURL bypass was supplied. This is the
       // recommended HIP/1.1 production setup.
       const resolver = new RegistryKeyResolver(this.registries[0]);
-      if (options.registryRootKey) {
-        resolver.setRegistryRootKey(options.registryRootKey);
-      }
+      // PROTOCOL.md §10.8 compile-time anchor; options.registryRootKey overrides.
+      resolver.setRegistryRootKey(options.registryRootKey ?? DefaultRegistryRootKey);
       this.keyResolver = resolver;
       this.providerResolver = resolver;
     }
